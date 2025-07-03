@@ -7,6 +7,8 @@
 (define-constant ERR_INSUFFICIENT_QUANTITY (err u105))
 (define-constant ERR_ALREADY_USED (err u106))
 (define-constant ERR_EXPIRED (err u107))
+(define-constant ERR_BADGE_ALREADY_CLAIMED (err u108))
+(define-constant ERR_INSUFFICIENT_POINTS (err u109))
 
 (define-data-var donation-counter uint u0)
 (define-data-var transfusion-counter uint u0)
@@ -291,4 +293,93 @@
       }
     )
   )
+)
+
+
+(define-map donor-rewards
+  { donor-id: principal }
+  {
+    total-points: uint,
+    lifesaver-badge: bool,
+    hero-badge: bool,
+    legend-badge: bool,
+    last-streak: uint,
+    current-streak: uint
+  }
+)
+
+(define-map badge-requirements
+  { badge-name: (string-ascii 20) }
+  { points-required: uint }
+)
+
+(define-private (initialize-badges)
+  (begin
+    (map-set badge-requirements { badge-name: "lifesaver" } { points-required: u100 })
+    (map-set badge-requirements { badge-name: "hero" } { points-required: u500 })
+    (map-set badge-requirements { badge-name: "legend" } { points-required: u1000 })
+  )
+)
+
+(define-private (get-blood-type-points (blood-type (string-ascii 3)))
+  (if (is-eq blood-type "O-") u50
+    (if (or (is-eq blood-type "AB-") (is-eq blood-type "A-") (is-eq blood-type "B-")) u30
+      u20
+    )
+  )
+)
+
+(define-public (award-donation-points (donor principal) (blood-type (string-ascii 3)))
+  (let
+    (
+      (current-rewards (default-to { total-points: u0, lifesaver-badge: false, hero-badge: false, legend-badge: false, last-streak: u0, current-streak: u0 } 
+                       (map-get? donor-rewards { donor-id: donor })))
+      (points-to-add (get-blood-type-points blood-type))
+      (new-total-points (+ (get total-points current-rewards) points-to-add))
+      (new-streak (+ (get current-streak current-rewards) u1))
+    )
+    (map-set donor-rewards
+      { donor-id: donor }
+      (merge current-rewards {
+        total-points: new-total-points,
+        current-streak: new-streak
+      })
+    )
+    (ok new-total-points)
+  )
+)
+
+(define-public (claim-badge (badge-name (string-ascii 20)))
+  (let
+    (
+      (donor-data (default-to { total-points: u0, lifesaver-badge: false, hero-badge: false, legend-badge: false, last-streak: u0, current-streak: u0 } 
+                  (map-get? donor-rewards { donor-id: tx-sender })))
+      (badge-req (unwrap! (map-get? badge-requirements { badge-name: badge-name }) (err u404)))
+      (points-required (get points-required badge-req))
+    )
+    (asserts! (>= (get total-points donor-data) points-required) ERR_INSUFFICIENT_POINTS)
+    (if (is-eq badge-name "lifesaver")
+      (begin
+        (asserts! (not (get lifesaver-badge donor-data)) ERR_BADGE_ALREADY_CLAIMED)
+        (map-set donor-rewards { donor-id: tx-sender } (merge donor-data { lifesaver-badge: true }))
+        (ok true)
+      )
+      (if (is-eq badge-name "hero")
+        (begin
+          (asserts! (not (get hero-badge donor-data)) ERR_BADGE_ALREADY_CLAIMED)
+          (map-set donor-rewards { donor-id: tx-sender } (merge donor-data { hero-badge: true }))
+          (ok true)
+        )
+        (begin
+          (asserts! (not (get legend-badge donor-data)) ERR_BADGE_ALREADY_CLAIMED)
+          (map-set donor-rewards { donor-id: tx-sender } (merge donor-data { legend-badge: true }))
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (get-donor-rewards (donor-id principal))
+  (map-get? donor-rewards { donor-id: donor-id })
 )
