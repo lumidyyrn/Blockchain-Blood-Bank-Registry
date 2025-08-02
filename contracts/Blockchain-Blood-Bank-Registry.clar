@@ -10,6 +10,12 @@
 (define-constant ERR_BADGE_ALREADY_CLAIMED (err u108))
 (define-constant ERR_INSUFFICIENT_POINTS (err u109))
 
+(define-constant ERR_REQUEST_NOT_FOUND (err u110))
+(define-constant ERR_REQUEST_EXPIRED (err u111))
+(define-constant ERR_REQUEST_FULFILLED (err u112))
+
+(define-data-var emergency-request-counter uint u0)
+
 (define-data-var donation-counter uint u0)
 (define-data-var transfusion-counter uint u0)
 
@@ -382,4 +388,105 @@
 
 (define-read-only (get-donor-rewards (donor-id principal))
   (map-get? donor-rewards { donor-id: donor-id })
+)
+
+(define-map emergency-requests
+  { request-id: uint }
+  {
+    hospital: principal,
+    blood-type: (string-ascii 3),
+    quantity-needed: uint,
+    urgency-level: uint,
+    request-time: uint,
+    expiry-time: uint,
+    quantity-fulfilled: uint,
+    status: (string-ascii 20),
+    location: (string-ascii 50)
+  }
+)
+
+(define-map emergency-responses
+  { request-id: uint, responder: principal }
+  {
+    donation-id: uint,
+    response-time: uint,
+    quantity-contributed: uint
+  }
+)
+
+(define-public (create-emergency-request 
+    (blood-type (string-ascii 3)) 
+    (quantity-needed uint) 
+    (urgency-level uint) 
+    (duration-blocks uint)
+    (location (string-ascii 50)))
+  (let
+    (
+      (request-id (+ (var-get emergency-request-counter) u1))
+      (current-time stacks-block-height)
+      (expiry-time (+ current-time duration-blocks))
+    )
+    (asserts! (is-valid-blood-type blood-type) ERR_INVALID_BLOOD_TYPE)
+    (asserts! (<= urgency-level u5) (err u400))
+    (var-set emergency-request-counter request-id)
+    (map-set emergency-requests
+      { request-id: request-id }
+      {
+        hospital: tx-sender,
+        blood-type: blood-type,
+        quantity-needed: quantity-needed,
+        urgency-level: urgency-level,
+        request-time: current-time,
+        expiry-time: expiry-time,
+        quantity-fulfilled: u0,
+        status: "active",
+        location: location
+      }
+    )
+    (ok request-id)
+  )
+)
+
+(define-public (respond-to-emergency (request-id uint) (donation-id uint))
+  (let
+    (
+      (request-data (unwrap! (map-get? emergency-requests { request-id: request-id }) ERR_REQUEST_NOT_FOUND))
+      (donation-data (unwrap! (get-donation donation-id) ERR_DONATION_NOT_FOUND))
+      (quantity-available (get quantity donation-data))
+      (quantity-needed (- (get quantity-needed request-data) (get quantity-fulfilled request-data)))
+      (quantity-to-fulfill (if (<= quantity-needed quantity-available) quantity-needed quantity-available))
+    )
+    (asserts! (> (get expiry-time request-data) stacks-block-height) ERR_REQUEST_EXPIRED)
+    (asserts! (is-eq (get status request-data) "active") ERR_REQUEST_FULFILLED)
+    (asserts! (is-eq (get blood-type request-data) (get blood-type donation-data)) ERR_INVALID_BLOOD_TYPE)
+    (asserts! (is-eq (get status donation-data) "available") ERR_ALREADY_USED)
+    (map-set emergency-responses
+      { request-id: request-id, responder: tx-sender }
+      {
+        donation-id: donation-id,
+        response-time: stacks-block-height,
+        quantity-contributed: quantity-to-fulfill
+      }
+    )
+    (map-set emergency-requests
+      { request-id: request-id }
+      (merge request-data {
+        quantity-fulfilled: (+ (get quantity-fulfilled request-data) quantity-to-fulfill),
+        status: (if (>= (+ (get quantity-fulfilled request-data) quantity-to-fulfill) (get quantity-needed request-data)) "fulfilled" "active")
+      })
+    )
+    (ok quantity-to-fulfill)
+  )
+)
+
+(define-read-only (get-emergency-request (request-id uint))
+  (map-get? emergency-requests { request-id: request-id })
+)
+
+(define-read-only (get-emergency-response (request-id uint) (responder principal))
+  (map-get? emergency-responses { request-id: request-id, responder: responder })
+)
+
+(define-read-only (get-emergency-request-counter)
+  (var-get emergency-request-counter)
 )
