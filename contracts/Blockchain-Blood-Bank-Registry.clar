@@ -490,3 +490,100 @@
 (define-read-only (get-emergency-request-counter)
   (var-get emergency-request-counter)
 )
+
+(define-constant ERR_NO_EXPIRING_DONATIONS (err u113))
+
+(define-map expiry-notifications
+  { blood-type: (string-ascii 3), alert-level: (string-ascii 10) }
+  { 
+    donation-count: uint,
+    total-quantity: uint,
+    earliest-expiry: uint
+  }
+)
+
+(define-map donation-expiry-tracker
+  { donation-id: uint }
+  { 
+    alert-level: (string-ascii 10),
+    days-until-expiry: uint
+  }
+)
+
+(define-private (get-expiry-alert-level (expiry-date uint))
+  (let ((days-until-expiry (- expiry-date stacks-block-height)))
+    (if (<= days-until-expiry u144) "critical"
+      (if (<= days-until-expiry u432) "warning"
+        (if (<= days-until-expiry u1008) "notice"
+          "safe"
+        )
+      )
+    )
+  )
+)
+
+(define-private (update-expiry-tracking (donation-id uint) (donation-data (tuple (donor principal) (blood-type (string-ascii 3)) (quantity uint) (donation-date uint) (expiry-date uint) (location (string-ascii 50)) (status (string-ascii 20)) (verified bool))))
+  (let 
+    (
+      (alert-level (get-expiry-alert-level (get expiry-date donation-data)))
+      (blood-type (get blood-type donation-data))
+      (quantity (get quantity donation-data))
+      (current-notifications (default-to { donation-count: u0, total-quantity: u0, earliest-expiry: u999999 } 
+                              (map-get? expiry-notifications { blood-type: blood-type, alert-level: alert-level })))
+    )
+    (if (not (is-eq alert-level "safe"))
+      (begin
+        (map-set donation-expiry-tracker
+          { donation-id: donation-id }
+          { alert-level: alert-level, days-until-expiry: (- (get expiry-date donation-data) stacks-block-height) }
+        )
+        (map-set expiry-notifications
+          { blood-type: blood-type, alert-level: alert-level }
+          {
+            donation-count: (+ (get donation-count current-notifications) u1),
+            total-quantity: (+ (get total-quantity current-notifications) quantity),
+            earliest-expiry: (if (< (get expiry-date donation-data) (get earliest-expiry current-notifications))
+                               (get expiry-date donation-data)
+                               (get earliest-expiry current-notifications)
+                             )
+          }
+        )
+      )
+      true
+    )
+  )
+)
+
+(define-public (refresh-expiry-alerts)
+  (begin
+    (map-delete expiry-notifications { blood-type: "A+", alert-level: "critical" })
+    (map-delete expiry-notifications { blood-type: "A+", alert-level: "warning" })
+    (map-delete expiry-notifications { blood-type: "A+", alert-level: "notice" })
+    (ok "Expiry alerts refreshed")
+  )
+)
+
+(define-read-only (get-expiry-alerts (blood-type (string-ascii 3)) (alert-level (string-ascii 10)))
+  (map-get? expiry-notifications { blood-type: blood-type, alert-level: alert-level })
+)
+
+(define-read-only (get-donation-alert-status (donation-id uint))
+  (map-get? donation-expiry-tracker { donation-id: donation-id })
+)
+
+(define-read-only (check-critical-inventory)
+  (let
+    (
+      (o-neg-critical (get-expiry-alerts "O-" "critical"))
+      (o-pos-critical (get-expiry-alerts "O+" "critical"))
+      (a-neg-critical (get-expiry-alerts "A-" "critical"))
+      (b-neg-critical (get-expiry-alerts "B-" "critical"))
+    )
+    (ok {
+      universal-donor: o-neg-critical,
+      o-positive: o-pos-critical,
+      a-negative: a-neg-critical,
+      b-negative: b-neg-critical
+    })
+  )
+)
