@@ -587,3 +587,79 @@
     })
   )
 )
+
+
+(define-constant ERR_NOT_ELIGIBLE (err u114))
+
+(define-map donor-eligibility-index
+  { donor-id: principal }
+  { 
+    blood-type: (string-ascii 3),
+    eligible: bool,
+    verified: bool,
+    days-since-last-donation: uint
+  }
+)
+
+(define-private (calculate-days-since-donation (last-donation-block uint))
+  (if (is-eq last-donation-block u0)
+    u999999
+    (- stacks-block-height last-donation-block)
+  )
+)
+
+(define-private (is-donor-eligible (last-donation-block uint))
+  (let ((days-since (calculate-days-since-donation last-donation-block)))
+    (or (is-eq last-donation-block u0) (>= days-since u8064))
+  )
+)
+
+(define-private (update-donor-eligibility-index (donor-id principal) (donor-data (tuple (name (string-ascii 50)) (blood-type (string-ascii 3)) (age uint) (last-donation uint) (total-donations uint) (verified bool))))
+  (map-set donor-eligibility-index
+    { donor-id: donor-id }
+    {
+      blood-type: (get blood-type donor-data),
+      eligible: (is-donor-eligible (get last-donation donor-data)),
+      verified: (get verified donor-data),
+      days-since-last-donation: (calculate-days-since-donation (get last-donation donor-data))
+    }
+  )
+)
+
+(define-read-only (check-donor-eligibility (donor-id principal))
+  (let ((donor-data (unwrap! (get-donor donor-id) ERR_DONOR_NOT_FOUND)))
+    (ok {
+      eligible: (is-donor-eligible (get last-donation donor-data)),
+      days-since-last: (calculate-days-since-donation (get last-donation donor-data)),
+      blood-type: (get blood-type donor-data),
+      verified: (get verified donor-data)
+    })
+  )
+)
+
+(define-read-only (find-compatible-donors (needed-blood-type (string-ascii 3)))
+  (ok {
+    exact-match-info: (get-donor-eligibility-summary needed-blood-type),
+    universal-donor-info: (get-donor-eligibility-summary "O-"),
+    total-compatible-types: (count-compatible-blood-types needed-blood-type)
+  })
+)
+
+(define-private (get-donor-eligibility-summary (blood-type (string-ascii 3)))
+  {
+    blood-type: blood-type,
+    inventory-available: (get available-quantity (get-blood-inventory blood-type))
+  }
+)
+
+(define-private (count-compatible-blood-types (recipient-type (string-ascii 3)))
+  (if (is-eq recipient-type "AB+") u8
+    (if (is-eq recipient-type "AB-") u4
+      (if (or (is-eq recipient-type "A+") (is-eq recipient-type "B+")) u4
+        (if (or (is-eq recipient-type "A-") (is-eq recipient-type "B-")) u2
+          (if (is-eq recipient-type "O+") u2 u1)
+        )
+      )
+    )
+  )
+)
