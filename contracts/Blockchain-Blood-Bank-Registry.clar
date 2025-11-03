@@ -14,6 +14,11 @@
 (define-constant ERR_REQUEST_EXPIRED (err u111))
 (define-constant ERR_REQUEST_FULFILLED (err u112))
 
+(define-constant ERR_AUDIT_NOT_FOUND (err u200))
+(define-constant ERR_INVALID_EVENT_TYPE (err u201))
+
+(define-data-var audit-entry-counter uint u0)
+
 (define-data-var emergency-request-counter uint u0)
 
 (define-data-var donation-counter uint u0)
@@ -661,5 +666,100 @@
         )
       )
     )
+  )
+)
+
+(define-map audit-trail
+  { audit-id: uint }
+  {
+    donation-id: uint,
+    event-type: (string-ascii 30),
+    actor: principal,
+    timestamp: uint,
+    previous-status: (string-ascii 20),
+    new-status: (string-ascii 20),
+    metadata: (string-ascii 100),
+    verified: bool
+  }
+)
+
+(define-map donation-audit-index
+  { donation-id: uint, event-sequence: uint }
+  { audit-id: uint }
+)
+
+(define-map donation-event-count
+  { donation-id: uint }
+  { total-events: uint }
+)
+
+(define-public (log-donation-event 
+    (donation-id uint)
+    (event-type (string-ascii 30))
+    (previous-status (string-ascii 20))
+    (new-status (string-ascii 20))
+    (metadata (string-ascii 100)))
+  (let
+    (
+      (audit-id (+ (var-get audit-entry-counter) u1))
+      (event-count-data (default-to { total-events: u0 } 
+                        (map-get? donation-event-count { donation-id: donation-id })))
+      (event-sequence (+ (get total-events event-count-data) u1))
+    )
+    (asserts! (is-valid-event-type event-type) ERR_INVALID_EVENT_TYPE)
+    (var-set audit-entry-counter audit-id)
+    (map-set audit-trail
+      { audit-id: audit-id }
+      {
+        donation-id: donation-id,
+        event-type: event-type,
+        actor: tx-sender,
+        timestamp: stacks-block-height,
+        previous-status: previous-status,
+        new-status: new-status,
+        metadata: metadata,
+        verified: false
+      }
+    )
+    (map-set donation-audit-index
+      { donation-id: donation-id, event-sequence: event-sequence }
+      { audit-id: audit-id }
+    )
+    (map-set donation-event-count
+      { donation-id: donation-id }
+      { total-events: event-sequence }
+    )
+    (ok audit-id)
+  )
+)
+
+(define-read-only (get-audit-entry (audit-id uint))
+  (map-get? audit-trail { audit-id: audit-id })
+)
+
+(define-read-only (get-donation-event-history (donation-id uint) (event-sequence uint))
+  (match (map-get? donation-audit-index { donation-id: donation-id, event-sequence: event-sequence })
+    index-data (map-get? audit-trail { audit-id: (get audit-id index-data) })
+    none
+  )
+)
+
+(define-read-only (get-donation-event-count (donation-id uint))
+  (default-to { total-events: u0 } (map-get? donation-event-count { donation-id: donation-id }))
+)
+
+(define-read-only (get-audit-counter)
+  (var-get audit-entry-counter)
+)
+
+(define-private (is-valid-event-type (event-type (string-ascii 30)))
+  (or
+    (is-eq event-type "donation-created")
+    (is-eq event-type "donation-verified")
+    (is-eq event-type "transfusion-started")
+    (is-eq event-type "transfusion-completed")
+    (is-eq event-type "status-changed")
+    (is-eq event-type "donation-expired")
+    (is-eq event-type "emergency-response")
   )
 )
